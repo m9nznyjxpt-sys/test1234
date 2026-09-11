@@ -21,16 +21,16 @@ MAX_STREAMERS   = 150
 STALE_TIMEOUT   = 600
 PAGE_TIMEOUT_MS = 35000
 
-# Mở rộng pattern — TikTok dùng nhiều endpoint khác nhau tùy version
+# CHỈ dùng endpoint thuộc namespace "webcast" (hệ thống live của TikTok) hoặc
+# "api/live/". KHÔNG dùng "api/recommend/itemlist", "aweme/v1/feed",
+# "api/mix/list", "api/explore/item_list" — đó là feed VIDEO thường (For You /
+# Explore), trả về uniqueId của người đăng video, không liên quan gì đến live.
+# Đây chính là nguyên nhân bot trước đó thêm hàng loạt acc "không live".
 WATCHED_URL_PATTERNS = (
     "webcast/room/list",
-    "api/recommend/itemlist",
-    "api/live/",
-    "webcast/feed",
     "webcast/room/search",
-    "api/explore/item_list",
-    "aweme/v1/feed",
-    "api/mix/list",
+    "webcast/feed/",
+    "api/live/",
 )
 
 OnNewStreamer  = Callable[[str], Awaitable[None]]
@@ -196,7 +196,7 @@ class LiveDiscovery:
             try:
                 data = await response.json()
                 captured_responses += 1
-                usernames.update(self._extract_usernames(data))
+                usernames.update(self._walk_extract_live_usernames(data))
             except Exception:
                 pass
 
@@ -217,26 +217,17 @@ class LiveDiscovery:
                 await page.mouse.wheel(0, 2000)
                 await page.wait_for_timeout(1500)
 
-            # Chiến lược 2: extract trực tiếp từ HTML (không phụ thuộc XHR)
+            # Chiến lược 2: extract từ SIGI_STATE / UNIVERSAL_DATA nhúng trong
+            # HTML của chính trang /live — CHỈ dùng trang /live, không dùng
+            # /explore, vì /explore là feed video thường, không phải live.
             html = await page.content()
             usernames.update(self._extract_from_html(html))
 
         except Exception as e:
             logger.warning(f"[Discovery] Load /live lỗi: {type(e).__name__}: {e}")
 
-        # ── Chiến lược 3: thử thêm trang explore nếu vẫn rỗng
-        if not usernames:
-            try:
-                await page.goto(
-                    "https://www.tiktok.com/explore",
-                    wait_until="domcontentloaded",
-                    timeout=PAGE_TIMEOUT_MS,
-                )
-                await page.wait_for_timeout(3000)
-                html = await page.content()
-                usernames.update(self._extract_from_html(html))
-            except Exception as e:
-                logger.warning(f"[Discovery] Load /explore lỗi: {e}")
+        # Không còn fallback sang /explore — nguồn đó vốn không phản ánh
+        # trạng thái live, chỉ khiến bot thêm nhầm acc không live vào theo dõi.
 
         await page.close()
         await context.close()
@@ -252,55 +243,84 @@ class LiveDiscovery:
     # ──────────────────────────────────────────
     @staticmethod
     def _extract_usernames(data) -> set[str]:
-        usernames: set[str] = set()
-        try:
-            raw = json.dumps(data)
-        except Exception:
-            return usernames
-        for uid in re.findall(
-            r'"(?:uniqueId|unique_id|display_id|authorName)"\s*:\s*"([A-Za-z0-9_.]{3,})"', raw
-        ):
-            usernames.add(uid.lower())
+        # Giữ lại (không còn gọi) — thay bằng _walk_extract_live_usernames bên dưới.
+        return set()
+
+    # ──────────────────────────────────────────
+    # EXTRACT có kiểm tra tín hiệu LIVE thật
+    # ──────────────────────────────────────────
+    # Trước đây bot lấy MỌI uniqueId xuất hiện bất kỳ đâu trong response,
+    # kể cả response của feed video thường → thêm nhầm acc không live.
+    # Giờ chỉ lấy uniqueId nằm TRONG (hoặc bên dưới) 1 node JSON có tín hiệu
+    # phòng live thật (status==2 / live_status==1 / có room_id kèm stream info).
+    @classmethod
+    def _walk_extract_live_usernames(cls, node, live_ctx: bool = False, usernames: set | None = None) -> set[str]:
+        if usernames is None:
+            usernames = set()
+
+        if isinstance(node, dict):
+            self_live = False
+
+            status = node.get("status")
+            if isinstance(status, int) and status == 2:
+                self_live = True
+
+            live_status = node.get("live_status", node.get("liveStatus"))
+            if isinstance(live_status, int) and live_status == 1:
+                self_live = True
+
+            room_id = node.get("room_id") or node.get("roomId") or node.get("id_str")
+            has_stream_info = any(
+                k in node for k in ("stream_url", "streamUrl", "rtmp_pull_url", "hls_pull_url")
+            )
+            if room_id and str(room_id) not in ("0", "") and has_stream_info:
+                self_live = True
+
+            new_ctx = live_ctx or self_live
+
+            if new_ctx:
+                for key in ("uniqueId", "unique_id", "display_id"):
+                    val = node.get(key)
+                    if isinstance(val, str) and len(val) >= 3:
+                        usernames.add(val.lower())
+
+            for v in node.values():
+                cls._walk_extract_live_usernames(v, new_ctx, usernames)
+
+        elif isinstance(node, list):
+            for item in node:
+                cls._walk_extract_live_usernames(item, live_ctx, usernames)
+
         return usernames
 
     # ──────────────────────────────────────────
-    # EXTRACT trực tiếp từ HTML page (fallback)
+    # EXTRACT trực tiếp từ HTML page /live (fallback)
     # ──────────────────────────────────────────
-    @staticmethod
-    def _extract_from_html(html: str) -> set[str]:
+    @classmethod
+    def _extract_from_html(cls, html: str) -> set[str]:
         usernames: set[str] = set()
         if not html:
             return usernames
 
-        # Tìm JSON blob nhúng trong script tag
         for pattern in [
             r'<script id="SIGI_STATE"[^>]*>(.*?)</script>',
             r'id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
             r'window\.__INIT_PROPS__\s*=\s*(\{.*?\});',
         ]:
             match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    blob = match.group(1)
-                    # Tìm uniqueId trong blob JSON
-                    for uid in re.findall(
-                        r'"(?:uniqueId|unique_id)"\s*:\s*"([A-Za-z0-9_.]{3,30})"', blob
-                    ):
-                        usernames.add(uid.lower())
-                    if usernames:
-                        logger.info(f"[Discovery] HTML fallback: {len(usernames)} username từ SIGI_STATE")
-                        break
-                except Exception:
-                    continue
-
-        # Fallback thô: regex trực tiếp toàn HTML
-        if not usernames:
-            for uid in re.findall(
-                r'"uniqueId"\s*:\s*"([A-Za-z0-9_.]{3,30})"', html
-            ):
-                usernames.add(uid.lower())
-            if usernames:
-                logger.info(f"[Discovery] HTML fallback (raw regex): {len(usernames)} username")
+            if not match:
+                continue
+            blob = match.group(1)
+            try:
+                # Parse JSON thật để duyệt cây có ngữ cảnh, thay vì regex mù toàn blob
+                data = json.loads(blob)
+                found = cls._walk_extract_live_usernames(data)
+                if found:
+                    usernames.update(found)
+                    logger.info(f"[Discovery] HTML fallback: {len(found)} username từ SIGI_STATE (có kiểm tra live)")
+                    break
+            except Exception:
+                continue
 
         return usernames
 
