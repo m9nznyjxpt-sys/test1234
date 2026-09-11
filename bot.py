@@ -1,3 +1,4 @@
+
 import os
 import logging
 from telegram import Update, BotCommand
@@ -11,10 +12,12 @@ from monitor import MultiMonitor
 
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8619018586:AAEkD-Qy4puXRNShkDz8C-sz8CiZs2zqMLE")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 # CHAT_ID: ID nhóm/kênh nhận thông báo tự động
-# Nếu để trống, thông báo sẽ gửi về chính chat đang dùng bot
-NOTIFY_CHAT_ID = os.environ.get("NOTIFY_CHAT_ID", "8619018586")
+NOTIFY_CHAT_ID = os.environ.get("NOTIFY_CHAT_ID", "")
+# WATCH_LIST: danh sách streamer tự động quét khi bot khởi động
+# Ví dụ: "user1,user2,user3"
+WATCH_LIST_RAW = os.environ.get("WATCH_LIST", "")
 
 
 def _xu_label(diamonds: int) -> str:
@@ -215,6 +218,29 @@ class TelegramBot:
         await self.app.initialize()
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
+
+        # Auto-start từ WATCH_LIST env
+        if WATCH_LIST_RAW:
+            auto_list = [u.strip().lstrip("@").lower()
+                         for u in WATCH_LIST_RAW.split(",") if u.strip()]
+            if auto_list:
+                logger.info(f"⚡ Auto-start quét {len(auto_list)} streamer: {auto_list}")
+                for username in auto_list:
+                    await self.monitor.add(username)
+                # Gửi thông báo về NOTIFY_CHAT_ID nếu có
+                if NOTIFY_CHAT_ID:
+                    names = ", ".join(f"@{u}" for u in auto_list)
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=NOTIFY_CHAT_ID,
+                            text=f"🤖 <b>Bot đã khởi động!</b>\n\n"
+                                 f"⚡ Đang tự động quét <b>{len(auto_list)}</b> streamer:\n"
+                                 f"{names}\n\n"
+                                 f"Sẽ thông báo ngay khi có rương hoặc túi xuất hiện.",
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        logger.error(f"Không gửi được thông báo khởi động: {e}")
 
         # Block mãi mãi
         import asyncio
