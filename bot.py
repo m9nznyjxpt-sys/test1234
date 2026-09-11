@@ -44,7 +44,7 @@ def _format_bag(username: str, data: dict) -> str:
         lines.append(f"🎀 Người gửi: <b>{sender}</b>")
 
     lines.append(f"")
-    lines.append(f"⏰ Sắp hết hạn — vào ngay!")
+    lines.append(f"⏰ Còn 1 phút — vào ngay!")
     lines.append(f'🔗 <a href="{data["link"]}">Vào LIVE @{username}</a>')
     return "\n".join(lines)
 
@@ -60,7 +60,7 @@ def _format_chest(username: str, data: dict) -> str:
         f"💎 Giá trị:  <b>{diamonds:,} kim cương</b>",
         f"🏆 Số người nhận:   <b>{people:,} người</b>",
         f"",
-        f"⏰ Sắp hết hạn — vào ngay!",
+        f"⏰ Còn 1 phút — vào ngay!",
         f'🔗 <a href="{data["link"]}">Vào LIVE @{username}</a>',
     ]
     return "\n".join(lines)
