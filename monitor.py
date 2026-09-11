@@ -60,9 +60,11 @@ class StreamerMonitor:
     async def _loop(self):
         while self._running:
             try:
-                is_live = await asyncio.get_event_loop().run_in_executor(
-                    None, TikTokLiveClient.is_live, None, self.username
-                )
+                # Trước đây gọi is_live() qua run_in_executor mà không await đúng cách
+                # → coroutine không chạy, is_live luôn "truthy" → bot tưởng streamer
+                # nào cũng đang live và cố connect liên tục, gây vòng lặp lỗi UserOfflineError.
+                check_client = TikTokLiveClient(unique_id=self.username)
+                is_live = await check_client.is_live()
                 if not is_live:
                     logger.info(f"@{self.username} chưa live, thử lại sau {RETRY_DELAY_NOT_LIVE}s")
                     await asyncio.sleep(RETRY_DELAY_NOT_LIVE)
