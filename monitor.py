@@ -21,6 +21,7 @@ RETRY_DELAY_NOT_LIVE = 60       # giây chờ khi streamer chưa live
 RETRY_DELAY_DISCONNECTED = 30   # giây chờ sau khi bị ngắt kết nối
 RETRY_DELAY_ERROR = 45          # giây chờ khi lỗi bất thường
 COOLDOWN_SECONDS = 600          # 10 phút cooldown cùng streamer + cùng loại event
+NOTIFY_LEAD_SECONDS = 60        # chỉ báo khi còn ~1 phút nữa là rương/túi đóng
 
 
 class StreamerMonitor:
@@ -115,19 +116,15 @@ class StreamerMonitor:
                 if len(self._seen_envelopes) > 100:
                     self._seen_envelopes.clear()
 
-            # Cooldown: không gửi nếu vừa báo túi từ streamer này
-            now = time.time()
-            if now - self._last_notify.get("bag", 0) < COOLDOWN_SECONDS:
-                return
-            self._last_notify["bag"] = now
-
             data = {
                 "diamond_count": info.diamond_count or 0,
                 "people_count":  info.people_count or 0,
                 "vote_count":    info.vote_count or 0,
                 "sender":        info.send_user_name or self.username,
+                "link":          f"https://www.tiktok.com/@{self.username}/live",
             }
-            await self.notify("bag", self.username, data)
+            # Không gửi ngay — đợi tới khi còn ~1 phút nữa mới báo
+            asyncio.create_task(self._schedule_notify("bag", info.unpack_at, data))
 
         # ──────────────────────────────────────────────────
         # RƯƠNG (Super Fan Box / Chest)
@@ -147,16 +144,12 @@ class StreamerMonitor:
             if eid:
                 self._seen_envelopes.add(eid)
 
-            now = time.time()
-            if now - self._last_notify.get("chest", 0) < COOLDOWN_SECONDS:
-                return
-            self._last_notify["chest"] = now
-
             data = {
                 "diamond_count": info.diamond_count or 0,
                 "people_count":  info.people_count or 0,
+                "link":          f"https://www.tiktok.com/@{self.username}/live",
             }
-            await self.notify("chest", self.username, data)
+            asyncio.create_task(self._schedule_notify("chest", info.unpack_at, data))
 
         try:
             await client.connect()
@@ -166,6 +159,41 @@ class StreamerMonitor:
             await asyncio.sleep(RETRY_DELAY_DISCONNECTED)
         finally:
             self._client = None
+
+    # ──────────────────────────────────────────
+    # GỬI THÔNG BÁO TRỄ — chỉ báo khi còn ~1 phút
+    # ──────────────────────────────────────────
+    def _compute_delay(self, unpack_at) -> float:
+        """Trả về số giây cần chờ trước khi gửi thông báo (còn ~NOTIFY_LEAD_SECONDS giây)."""
+        try:
+            ts = float(unpack_at)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if ts <= 0:
+            return 0.0
+        if ts > 1e12:          # timestamp ở dạng mili-giây
+            ts /= 1000.0
+
+        remaining = ts - time.time()
+        # Nếu remaining bất thường (âm, hoặc quá xa >1h) thì gửi ngay, không đoán mò
+        if remaining <= NOTIFY_LEAD_SECONDS or remaining > 3600:
+            return 0.0
+        return remaining - NOTIFY_LEAD_SECONDS
+
+    async def _schedule_notify(self, event_type: str, unpack_at, data: dict):
+        delay = self._compute_delay(unpack_at)
+        if delay > 0:
+            logger.info(f"@{self.username} [{event_type}] đợi {delay:.0f}s rồi mới báo")
+            await asyncio.sleep(delay)
+
+        # Cooldown check thực hiện ngay trước khi gửi (không phải lúc phát hiện event)
+        now = time.time()
+        if now - self._last_notify.get(event_type, 0) < COOLDOWN_SECONDS:
+            return
+        self._last_notify[event_type] = now
+
+        await self.notify(event_type, self.username, data)
 
 
 class MultiMonitor:
