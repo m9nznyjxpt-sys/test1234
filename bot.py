@@ -8,6 +8,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from monitor import MultiMonitor
+from discovery import LiveDiscovery
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,8 @@ def _format_bag(username: str, data: dict) -> str:
         lines.append(f"🎀 Người gửi: <b>{sender}</b>")
 
     lines.append(f"")
-    lines.append(f"⚡ Vào <b>@{username}</b> ngay để nhận!")
+    lines.append(f"⏰ Sắp hết hạn — vào ngay!")
+    lines.append(f'🔗 <a href="{data["link"]}">Vào LIVE @{username}</a>')
     return "\n".join(lines)
 
 
@@ -58,7 +60,8 @@ def _format_chest(username: str, data: dict) -> str:
         f"💎 Giá trị:  <b>{diamonds:,} kim cương</b>",
         f"🏆 Số người nhận:   <b>{people:,} người</b>",
         f"",
-        f"⚡ Vào <b>@{username}</b> ngay để mở rương!",
+        f"⏰ Sắp hết hạn — vào ngay!",
+        f'🔗 <a href="{data["link"]}">Vào LIVE @{username}</a>',
     ]
     return "\n".join(lines)
 
@@ -70,6 +73,11 @@ class TelegramBot:
 
         self.app = Application.builder().token(BOT_TOKEN).build()
         self.monitor = MultiMonitor(notify=self._on_event)
+        # Tự động tìm streamer đang live — không cần /add thủ công nữa
+        self.discovery = LiveDiscovery(
+            on_add=self._on_discovery_add,
+            on_remove=self._on_discovery_remove,
+        )
 
         # Đăng ký lệnh
         self.app.add_handler(CommandHandler("start",  self._cmd_start))
@@ -104,6 +112,17 @@ class TelegramBot:
             )
         except Exception as e:
             logger.error(f"Gửi thông báo thất bại: {e}")
+
+    # ──────────────────────────────────────────────────────────
+    # CALLBACK từ discovery — tự thêm/xóa streamer, không nhắn chat
+    # ──────────────────────────────────────────────────────────
+    async def _on_discovery_add(self, username: str):
+        added = await self.monitor.add(username)
+        if added:
+            logger.info(f"[Auto-discovery] Thêm @{username}")
+
+    async def _on_discovery_remove(self, username: str):
+        await self.monitor.remove(username)
 
     # ──────────────────────────────────────────────────────────
     # LỆNH /start
@@ -218,7 +237,10 @@ class TelegramBot:
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
 
-        # Auto-start từ WATCH_LIST env
+        # Tự động quét TikTok tìm streamer đang live (không cần /add nữa)
+        self.discovery.start()
+
+        # Auto-start từ WATCH_LIST env (vẫn hỗ trợ nếu muốn ghim sẵn 1 vài streamer)
         if WATCH_LIST_RAW:
             auto_list = [u.strip().lstrip("@").lower()
                          for u in WATCH_LIST_RAW.split(",") if u.strip()]
@@ -248,6 +270,7 @@ class TelegramBot:
         except (KeyboardInterrupt, SystemExit):
             pass
         finally:
+            await self.discovery.stop()
             await self.monitor.stop_all()
             await self.app.updater.stop()
             await self.app.stop()
