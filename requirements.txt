@@ -1,3 +1,4 @@
 TikTokLive
 python-telegram-bot[ext]
 playwright
+cloudscraper
