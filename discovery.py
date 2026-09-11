@@ -85,7 +85,7 @@ class LiveDiscovery:
                 logger.info(f"[Discovery] Method 1 tìm được {len(usernames)} streamer")
                 return usernames
         except Exception as e:
-            logger.debug(f"Method 1 thất bại: {e}")
+            logger.warning(f"Method 1 thất bại: {type(e).__name__}: {e}")
 
         # Phương pháp 2: Webcast API room list
         try:
@@ -94,7 +94,7 @@ class LiveDiscovery:
                 logger.info(f"[Discovery] Method 2 tìm được {len(usernames)} streamer")
                 return usernames
         except Exception as e:
-            logger.debug(f"Method 2 thất bại: {e}")
+            logger.warning(f"Method 2 thất bại: {type(e).__name__}: {e}")
 
         # Phương pháp 3: TikTok explore API
         try:
@@ -102,7 +102,10 @@ class LiveDiscovery:
             if usernames:
                 logger.info(f"[Discovery] Method 3 tìm được {len(usernames)} streamer")
         except Exception as e:
-            logger.debug(f"Method 3 thất bại: {e}")
+            logger.warning(f"Method 3 thất bại: {type(e).__name__}: {e}")
+
+        if not usernames:
+            logger.warning("[Discovery] Cả 3 phương pháp đều không tìm được streamer nào ở vòng quét này")
 
         return usernames
 
