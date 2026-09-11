@@ -1,0 +1,9 @@
+# Cấu hình build cho Railway (Nixpacks) — cần thiết để Playwright hoạt động.
+# Nixpacks tự cài requirements.txt, nhưng KHÔNG tự cài trình duyệt Chromium mà
+# Playwright cần. Thiếu bước này, bot sẽ log lỗi "Không khởi động được Chromium".
+
+[phases.install]
+cmds = [
+    "pip install -r requirements.txt",
+    "playwright install --with-deps chromium"
+]
