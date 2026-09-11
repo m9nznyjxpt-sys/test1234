@@ -11,10 +11,11 @@ from monitor import MultiMonitor
 
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "
+8619018586:AAEkD-Qy4puXRNShkDz8C-sz8CiZs2zqMLE")
 # CHAT_ID: ID nhóm/kênh nhận thông báo tự động
 # Nếu để trống, thông báo sẽ gửi về chính chat đang dùng bot
-NOTIFY_CHAT_ID = os.environ.get("NOTIFY_CHAT_ID", "")
+NOTIFY_CHAT_ID = os.environ.get("NOTIFY_CHAT_ID", "8619018586")
 
 
 def _xu_label(diamonds: int) -> str:
