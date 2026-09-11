@@ -144,6 +144,16 @@ class LiveDiscovery:
         for uid in re.findall(r'"uniqueId"\s*:\s*"([A-Za-z0-9_.]{3,})"', resp.text):
             usernames.add(uid.lower())
 
+        if not usernames:
+            # Chẩn đoán: log status + đoạn đầu response để biết TikTok trả về gì
+            # (trang thật, trang chặn/captcha, hay redirect) thay vì đoán mò.
+            snippet = resp.text[:300].replace("\n", " ")
+            logger.warning(
+                f"[Discovery] Method 1: status={resp.status_code}, "
+                f"độ dài={len(resp.text)}, có_UNIVERSAL_DATA={bool(match)}, "
+                f"đoạn đầu='{snippet}'"
+            )
+
         return usernames
 
     def _method_webcast_api(self) -> set[str]:
@@ -157,6 +167,7 @@ class LiveDiscovery:
 
         usernames: set[str] = set()
         cursor = "0"
+        last_data = None
 
         for _ in range(ROOM_LIST_PAGES):
             params = {
@@ -172,6 +183,7 @@ class LiveDiscovery:
             )
             resp.raise_for_status()
             data = resp.json()
+            last_data = data
 
             payload = data.get("data") or {}
             rooms = payload.get("room_infos") or []
@@ -190,6 +202,10 @@ class LiveDiscovery:
             if not has_more or not next_cursor or next_cursor == cursor:
                 break
             cursor = str(next_cursor)
+
+        if not usernames:
+            snippet = str(last_data)[:300] if last_data is not None else "(request lỗi trước khi có response)"
+            logger.warning(f"[Discovery] Method 2: raw response mẫu='{snippet}'")
 
         return usernames
 
@@ -221,6 +237,10 @@ class LiveDiscovery:
             # Chỉ lấy nếu đang live
             if uid and item.get("isLive"):
                 usernames.add(uid.lower())
+
+        if not usernames:
+            snippet = str(data)[:300]
+            logger.warning(f"[Discovery] Method 3: raw response mẫu='{snippet}'")
 
         return usernames
 
