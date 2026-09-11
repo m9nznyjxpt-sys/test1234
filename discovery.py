@@ -12,9 +12,10 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-SCAN_INTERVAL   = 180   # quét mỗi 3 phút
-MAX_STREAMERS   = 60    # tối đa theo dõi cùng lúc
+SCAN_INTERVAL   = 30    # quét mỗi 30 giây — gần như liên tục
+MAX_STREAMERS   = 150   # tối đa theo dõi cùng lúc
 STALE_TIMEOUT   = 600   # xóa streamer offline quá 10 phút
+ROOM_LIST_PAGES = 6     # số trang phân trang lấy ở method 2 mỗi lần quét (6×50 = tới 300 phòng)
 
 OnNewStreamer = Callable[[str], Awaitable[None]]
 OnDropStreamer = Callable[[str], Awaitable[None]]
@@ -78,29 +79,27 @@ class LiveDiscovery:
 
         usernames: set[str] = set()
 
-        # Phương pháp 1: TikTok LIVE page (embedded JSON)
+        # Chạy CẢ 3 phương pháp mỗi lần quét và gộp kết quả — trước đây dừng
+        # ngay khi 1 phương pháp có kết quả, bỏ lỡ rất nhiều streamer mà 2
+        # phương pháp còn lại tìm được (mỗi nguồn phủ 1 tập streamer khác nhau).
         try:
-            usernames |= self._method_live_page()
-            if usernames:
-                logger.info(f"[Discovery] Method 1 tìm được {len(usernames)} streamer")
-                return usernames
+            r1 = self._method_live_page()
+            usernames |= r1
+            logger.info(f"[Discovery] Method 1 tìm được {len(r1)} streamer")
         except Exception as e:
             logger.warning(f"Method 1 thất bại: {type(e).__name__}: {e}")
 
-        # Phương pháp 2: Webcast API room list
         try:
-            usernames |= self._method_webcast_api()
-            if usernames:
-                logger.info(f"[Discovery] Method 2 tìm được {len(usernames)} streamer")
-                return usernames
+            r2 = self._method_webcast_api()
+            usernames |= r2
+            logger.info(f"[Discovery] Method 2 tìm được {len(r2)} streamer")
         except Exception as e:
             logger.warning(f"Method 2 thất bại: {type(e).__name__}: {e}")
 
-        # Phương pháp 3: TikTok explore API
         try:
-            usernames |= self._method_explore_api()
-            if usernames:
-                logger.info(f"[Discovery] Method 3 tìm được {len(usernames)} streamer")
+            r3 = self._method_explore_api()
+            usernames |= r3
+            logger.info(f"[Discovery] Method 3 tìm được {len(r3)} streamer")
         except Exception as e:
             logger.warning(f"Method 3 thất bại: {type(e).__name__}: {e}")
 
@@ -148,34 +147,49 @@ class LiveDiscovery:
         return usernames
 
     def _method_webcast_api(self) -> set[str]:
-        """Hit webcast API của TikTok để lấy danh sách live rooms."""
+        """Hit webcast API của TikTok để lấy danh sách live rooms — có phân trang."""
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/124.0.0.0 Safari/537.36",
             "Referer": "https://www.tiktok.com/",
         }
-        params = {
-            "aid": "1988",
-            "app_name": "tiktok_web",
-            "type_id": "0",
-            "count": "50",
-            "cursor": "0",
-        }
-        resp = self._scraper.get(
-            "https://webcast.tiktok.com/webcast/room/list/",
-            params=params, headers=headers, timeout=15
-        )
-        resp.raise_for_status()
-        data = resp.json()
 
         usernames: set[str] = set()
-        rooms = (data.get("data") or {}).get("room_infos") or []
-        for room in rooms:
-            owner = room.get("owner") or {}
-            uid = owner.get("display_id") or owner.get("unique_id") or ""
-            if uid:
-                usernames.add(uid.lower())
+        cursor = "0"
+
+        for _ in range(ROOM_LIST_PAGES):
+            params = {
+                "aid": "1988",
+                "app_name": "tiktok_web",
+                "type_id": "0",
+                "count": "50",
+                "cursor": cursor,
+            }
+            resp = self._scraper.get(
+                "https://webcast.tiktok.com/webcast/room/list/",
+                params=params, headers=headers, timeout=15
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            payload = data.get("data") or {}
+            rooms = payload.get("room_infos") or []
+            if not rooms:
+                break
+
+            for room in rooms:
+                owner = room.get("owner") or {}
+                uid = owner.get("display_id") or owner.get("unique_id") or ""
+                if uid:
+                    usernames.add(uid.lower())
+
+            # Dừng nếu API báo hết trang hoặc không có cursor mới
+            next_cursor = payload.get("cursor")
+            has_more = payload.get("has_more", True)
+            if not has_more or not next_cursor or next_cursor == cursor:
+                break
+            cursor = str(next_cursor)
 
         return usernames
 
