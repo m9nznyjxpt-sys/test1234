@@ -16,40 +16,32 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-SCAN_INTERVAL   = 75     # quét mỗi 75s — chậm hơn bản HTTP thô vì cần load trang thật
-MAX_STREAMERS   = 150    # tối đa theo dõi cùng lúc
-STALE_TIMEOUT   = 600    # xóa streamer offline quá 10 phút
-PAGE_TIMEOUT_MS = 30000  # timeout tải trang (30s)
-SCROLL_PASSES   = 3      # số lần cuộn trang để kích hoạt load thêm phòng (lazy-load)
+SCAN_INTERVAL   = 90
+MAX_STREAMERS   = 150
+STALE_TIMEOUT   = 600
+PAGE_TIMEOUT_MS = 35000
 
-# Các endpoint mà JS của TikTok tự gọi (kèm chữ ký hợp lệ) khi trang render —
-# ta không tự gọi các endpoint này nữa, mà "nghe lén" response thật của trình
-# duyệt khi nó tự chạy, nên luôn có chữ ký đúng do chính TikTok tạo ra.
+# Mở rộng pattern — TikTok dùng nhiều endpoint khác nhau tùy version
 WATCHED_URL_PATTERNS = (
     "webcast/room/list",
     "api/recommend/itemlist",
     "api/live/",
     "webcast/feed",
+    "webcast/room/search",
+    "api/explore/item_list",
+    "aweme/v1/feed",
+    "api/mix/list",
 )
 
-OnNewStreamer = Callable[[str], Awaitable[None]]
+OnNewStreamer  = Callable[[str], Awaitable[None]]
 OnDropStreamer = Callable[[str], Awaitable[None]]
 
 
 class LiveDiscovery:
-    """Tự động tìm streamer đang live trên TikTok bằng trình duyệt ẩn (Playwright).
-
-    Lý do đổi từ gọi HTTP trực tiếp sang headless browser: TikTok yêu cầu các
-    request tới API nội bộ (room list, recommend...) phải có chữ ký (X-Bogus,
-    msToken...) được JavaScript của chính TikTok sinh ra lúc chạy trong trình
-    duyệt thật. Gọi thẳng bằng requests/cloudscraper sẽ luôn bị từ chối với
-    lỗi "Url does not match" dù request trông giống hệt request thật.
-    """
-
     def __init__(self, on_add: OnNewStreamer, on_remove: OnDropStreamer):
         self.on_add    = on_add
         self.on_remove = on_remove
-        self._active: dict[str, float] = {}   # username → last_seen timestamp
+        self._active: dict[str, float] = {}
         self._task: asyncio.Task | None = None
         self._running = False
         self._playwright: "Playwright | None" = None
@@ -77,9 +69,7 @@ class LiveDiscovery:
     # ──────────────────────────────────────────
     async def _ensure_browser(self) -> bool:
         if async_playwright is None:
-            logger.warning(
-                "playwright chưa cài — pip install playwright && playwright install chromium"
-            )
+            logger.warning("playwright chưa cài")
             return False
         if self._browser is not None:
             return True
@@ -92,27 +82,19 @@ class LiveDiscovery:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-setuid-sandbox",
+                    "--disable-blink-features=AutomationControlled",
                 ],
             )
             logger.info("[Discovery] Đã khởi động Chromium headless")
             return True
         except Exception as e:
-            is_missing_binary = "Executable doesn't exist" in str(e)
-            if is_missing_binary and not self._install_attempted:
-                # Chromium chưa được cài lúc build (ví dụ Railway bỏ qua bước
-                # nixpacks.toml) — tự cài ngay lúc chạy, chỉ thử 1 lần để
-                # tránh lặp vô hạn nếu môi trường không cho phép cài.
+            is_missing = "Executable doesn't exist" in str(e)
+            if is_missing and not self._install_attempted:
                 self._install_attempted = True
-                logger.warning(
-                    "[Discovery] Chưa có Chromium — đang tự cài lúc runtime "
-                    "(có thể mất 1-2 phút, chỉ xảy ra 1 lần)..."
-                )
+                logger.warning("[Discovery] Chưa có Chromium — đang tự cài...")
                 if await self._install_chromium():
                     return await self._ensure_browser()
-
-            logger.error(
-                f"[Discovery] Không khởi động được Chromium: {type(e).__name__}: {e}"
-            )
+            logger.error(f"[Discovery] Không khởi động được Chromium: {type(e).__name__}: {e}")
             if self._playwright:
                 try:
                     await self._playwright.stop()
@@ -123,7 +105,6 @@ class LiveDiscovery:
             return False
 
     async def _install_chromium(self) -> bool:
-        """Chạy `playwright install chromium` ngay lúc runtime nếu chưa có sẵn."""
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "playwright", "install", "chromium",
@@ -133,13 +114,10 @@ class LiveDiscovery:
             if proc.returncode == 0:
                 logger.info("[Discovery] Cài Chromium thành công")
                 return True
-            logger.error(
-                f"[Discovery] Cài Chromium thất bại (mã {proc.returncode}): "
-                f"{out.decode(errors='ignore')[-500:]}"
-            )
+            logger.error(f"[Discovery] Cài Chromium thất bại: {out.decode(errors='ignore')[-300:]}")
             return False
         except Exception as e:
-            logger.error(f"[Discovery] Lỗi khi tự cài Chromium: {type(e).__name__}: {e}")
+            logger.error(f"[Discovery] Lỗi cài Chromium: {e}")
             return False
 
     async def _close_browser(self):
@@ -165,108 +143,182 @@ class LiveDiscovery:
                 found = await self._fetch_live_usernames()
                 if found:
                     await self._sync(found)
+                else:
+                    logger.warning("[Discovery] Không tìm được streamer nào lần này")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Discovery lỗi: {type(e).__name__}: {e}")
-
             await asyncio.sleep(SCAN_INTERVAL)
 
     # ──────────────────────────────────────────
-    # FETCH — mở trang thật, nghe lén response JS tự gọi
+    # FETCH — 2 chiến lược song song
     # ──────────────────────────────────────────
     async def _fetch_live_usernames(self) -> set[str]:
         if not await self._ensure_browser():
             return set()
 
         usernames: set[str] = set()
-        captured = 0
+        captured_responses = 0
 
         context = await self._browser.new_context(
             user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
             ),
             locale="vi-VN",
             viewport={"width": 1280, "height": 900},
+            # Tắt WebDriver flag để TikTok không detect bot
+            extra_http_headers={
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+            },
         )
+
+        # Chặn resource không cần thiết để load nhanh hơn
+        await context.route(
+            "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
+            lambda route: route.abort()
+        )
+
         page = await context.new_page()
 
+        # Ẩn navigator.webdriver
+        await page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        """)
+
         async def on_response(response):
-            nonlocal captured
+            nonlocal captured_responses
             url = response.url
             if not any(p in url for p in WATCHED_URL_PATTERNS):
                 return
             try:
                 data = await response.json()
+                captured_responses += 1
+                usernames.update(self._extract_usernames(data))
             except Exception:
-                return
-            captured += 1
-            usernames.update(self._extract_usernames(data))
+                pass
 
         page.on("response", on_response)
 
+        # ── Chiến lược 1: trang /live chính
         try:
             await page.goto(
                 "https://www.tiktok.com/live",
-                wait_until="networkidle",
+                wait_until="domcontentloaded",   # nhanh hơn networkidle
                 timeout=PAGE_TIMEOUT_MS,
             )
-            # Cuộn trang để kích hoạt lazy-load thêm phòng live
-            for _ in range(SCROLL_PASSES):
-                await page.mouse.wheel(0, 2500)
-                await page.wait_for_timeout(1200)
+            # Đợi thêm để XHR kịp fire
+            await page.wait_for_timeout(4000)
+
+            # Cuộn để kích lazy-load
+            for _ in range(3):
+                await page.mouse.wheel(0, 2000)
+                await page.wait_for_timeout(1500)
+
+            # Chiến lược 2: extract trực tiếp từ HTML (không phụ thuộc XHR)
+            html = await page.content()
+            usernames.update(self._extract_from_html(html))
+
         except Exception as e:
-            logger.warning(f"[Discovery] Playwright load trang lỗi: {type(e).__name__}: {e}")
-        finally:
-            await page.close()
-            await context.close()
+            logger.warning(f"[Discovery] Load /live lỗi: {type(e).__name__}: {e}")
 
+        # ── Chiến lược 3: thử thêm trang explore nếu vẫn rỗng
         if not usernames:
-            logger.warning(
-                f"[Discovery] Không tìm được streamer nào (đã bắt {captured} response JSON khớp pattern theo dõi)"
-            )
-        else:
-            logger.info(f"[Discovery] Tìm được {len(usernames)} streamer từ {captured} response")
+            try:
+                await page.goto(
+                    "https://www.tiktok.com/explore",
+                    wait_until="domcontentloaded",
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+                await page.wait_for_timeout(3000)
+                html = await page.content()
+                usernames.update(self._extract_from_html(html))
+            except Exception as e:
+                logger.warning(f"[Discovery] Load /explore lỗi: {e}")
 
+        await page.close()
+        await context.close()
+
+        logger.info(
+            f"[Discovery] Kết quả: {len(usernames)} username | "
+            f"XHR bắt được: {captured_responses} response"
+        )
         return usernames
 
+    # ──────────────────────────────────────────
+    # EXTRACT từ JSON response (XHR)
+    # ──────────────────────────────────────────
     @staticmethod
     def _extract_usernames(data) -> set[str]:
-        """Bóc uniqueId/display_id từ bất kỳ response JSON nào TikTok trả về."""
         usernames: set[str] = set()
         try:
             raw = json.dumps(data)
         except Exception:
             return usernames
-
         for uid in re.findall(
-            r'"(?:uniqueId|unique_id|display_id)"\s*:\s*"([A-Za-z0-9_.]{3,})"', raw
+            r'"(?:uniqueId|unique_id|display_id|authorName)"\s*:\s*"([A-Za-z0-9_.]{3,})"', raw
         ):
             usernames.add(uid.lower())
+        return usernames
+
+    # ──────────────────────────────────────────
+    # EXTRACT trực tiếp từ HTML page (fallback)
+    # ──────────────────────────────────────────
+    @staticmethod
+    def _extract_from_html(html: str) -> set[str]:
+        usernames: set[str] = set()
+        if not html:
+            return usernames
+
+        # Tìm JSON blob nhúng trong script tag
+        for pattern in [
+            r'<script id="SIGI_STATE"[^>]*>(.*?)</script>',
+            r'id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+            r'window\.__INIT_PROPS__\s*=\s*(\{.*?\});',
+        ]:
+            match = re.search(pattern, html, re.DOTALL)
+            if match:
+                try:
+                    blob = match.group(1)
+                    # Tìm uniqueId trong blob JSON
+                    for uid in re.findall(
+                        r'"(?:uniqueId|unique_id)"\s*:\s*"([A-Za-z0-9_.]{3,30})"', blob
+                    ):
+                        usernames.add(uid.lower())
+                    if usernames:
+                        logger.info(f"[Discovery] HTML fallback: {len(usernames)} username từ SIGI_STATE")
+                        break
+                except Exception:
+                    continue
+
+        # Fallback thô: regex trực tiếp toàn HTML
+        if not usernames:
+            for uid in re.findall(
+                r'"uniqueId"\s*:\s*"([A-Za-z0-9_.]{3,30})"', html
+            ):
+                usernames.add(uid.lower())
+            if usernames:
+                logger.info(f"[Discovery] HTML fallback (raw regex): {len(usernames)} username")
 
         return usernames
 
     # ──────────────────────────────────────────
-    # SYNC — thêm mới / xóa stale
+    # SYNC
     # ──────────────────────────────────────────
     async def _sync(self, found: set[str]):
         now = time.time()
-
         for u in found:
             self._active[u] = now
-
         for u in found:
             if len(self._active) <= MAX_STREAMERS:
-                await self.on_add(u)   # MultiMonitor.add() tự bỏ qua nếu đã có
-
+                await self.on_add(u)
         stale = [u for u, ts in self._active.items() if now - ts > STALE_TIMEOUT]
         for u in stale:
-            logger.info(f"[Discovery] @{u} offline, xóa khỏi danh sách")
+            logger.info(f"[Discovery] @{u} offline → xóa")
             del self._active[u]
             await self.on_remove(u)
-
         logger.info(
-            f"[Discovery] Đang theo dõi {len(self._active)} streamer | "
-            f"Tìm thấy {len(found)} live lần này"
+            f"[Discovery] Theo dõi {len(self._active)} | Tìm thấy {len(found)} live"
         )
