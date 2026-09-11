@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Callable, Awaitable, Dict, Set
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import (
@@ -19,6 +20,7 @@ NotifyCallback = Callable[[str, str, dict], Awaitable[None]]
 RETRY_DELAY_NOT_LIVE = 60       # giây chờ khi streamer chưa live
 RETRY_DELAY_DISCONNECTED = 30   # giây chờ sau khi bị ngắt kết nối
 RETRY_DELAY_ERROR = 45          # giây chờ khi lỗi bất thường
+COOLDOWN_SECONDS = 600          # 10 phút cooldown cùng streamer + cùng loại event
 
 
 class StreamerMonitor:
@@ -30,6 +32,10 @@ class StreamerMonitor:
         self._running = False
         self._task: asyncio.Task | None = None
         self._client: TikTokLiveClient | None = None
+        # Chống spam: last_notify[event_type] = timestamp
+        self._last_notify: dict[str, float] = {}
+        # Chống gửi trùng cùng 1 envelope
+        self._seen_envelopes: set[str] = set()
 
     def start(self):
         if not self._running:
@@ -91,10 +97,8 @@ class StreamerMonitor:
         # ──────────────────────────────────────────────────
         @client.on(EnvelopeEvent)
         async def on_envelope(event: EnvelopeEvent):
-            # Bỏ qua SuperFanBox ở đây (xử lý riêng bên dưới)
             if isinstance(event, SuperFanBoxEvent):
                 return
-            # Chỉ báo khi túi vừa xuất hiện (NEW), bỏ qua HIDE
             if event.display != EnvelopeDisplay.NEW:
                 return
 
@@ -102,11 +106,26 @@ class StreamerMonitor:
             if not info:
                 return
 
+            # Chống gửi trùng cùng 1 envelope_id
+            eid = info.envelope_id or ""
+            if eid and eid in self._seen_envelopes:
+                return
+            if eid:
+                self._seen_envelopes.add(eid)
+                if len(self._seen_envelopes) > 100:
+                    self._seen_envelopes.clear()
+
+            # Cooldown: không gửi nếu vừa báo túi từ streamer này
+            now = time.time()
+            if now - self._last_notify.get("bag", 0) < COOLDOWN_SECONDS:
+                return
+            self._last_notify["bag"] = now
+
             data = {
                 "diamond_count": info.diamond_count or 0,
-                "people_count": info.people_count or 0,
-                "vote_count": info.vote_count or 0,       # người đang tham gia
-                "sender": info.send_user_name or self.username,
+                "people_count":  info.people_count or 0,
+                "vote_count":    info.vote_count or 0,
+                "sender":        info.send_user_name or self.username,
             }
             await self.notify("bag", self.username, data)
 
@@ -122,9 +141,20 @@ class StreamerMonitor:
             if not info:
                 return
 
+            eid = info.envelope_id or ""
+            if eid and eid in self._seen_envelopes:
+                return
+            if eid:
+                self._seen_envelopes.add(eid)
+
+            now = time.time()
+            if now - self._last_notify.get("chest", 0) < COOLDOWN_SECONDS:
+                return
+            self._last_notify["chest"] = now
+
             data = {
                 "diamond_count": info.diamond_count or 0,
-                "people_count": info.people_count or 0,
+                "people_count":  info.people_count or 0,
             }
             await self.notify("chest", self.username, data)
 
