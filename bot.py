@@ -12,7 +12,7 @@ from discovery import LiveDiscovery
 
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8550034707:AAESxNB97Yd-woA3eAm6PhflPid_c4W5RO0")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8619018586:AAGP0VUnBspppJo7yhp32P0g_j7avtmsVBM")
 # CHAT_ID: ID nhóm/kênh nhận thông báo tự động
 NOTIFY_CHAT_ID = os.environ.get("NOTIFY_CHAT_ID", "8093889693")
 # WATCH_LIST: danh sách streamer tự động quét khi bot khởi động
