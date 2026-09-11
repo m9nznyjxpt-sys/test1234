@@ -1,2 +1,3 @@
 TikTokLive
 python-telegram-bot[ext]
+cloudscraper
