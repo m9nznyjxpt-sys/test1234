@@ -58,11 +58,23 @@ class StreamerMonitor:
                 pass
 
     async def _loop(self):
+        # Lỗi cứng — user không thể live, bỏ qua hoàn toàn
+        _SKIP_ERRORS = (
+            "not capable of going LIVE",
+            "does not exist",
+            "never gone live",
+        )
+        # Lỗi mềm — TikTok rate limit hoặc SSL tạm thời, thử lại sau
+        _SOFT_ERRORS = (
+            "Expecting value",          # empty response / rate limit
+            "TLSV1_ALERT",             # SSL error tạm thời
+            "JSONDecodeError",
+            "ConnectionError",
+            "TimeoutError",
+        )
+
         while self._running:
             try:
-                # Trước đây gọi is_live() qua run_in_executor mà không await đúng cách
-                # → coroutine không chạy, is_live luôn "truthy" → bot tưởng streamer
-                # nào cũng đang live và cố connect liên tục, gây vòng lặp lỗi UserOfflineError.
                 check_client = TikTokLiveClient(unique_id=self.username)
                 is_live = await check_client.is_live()
                 if not is_live:
@@ -75,7 +87,21 @@ class StreamerMonitor:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"@{self.username} lỗi không mong muốn: {e}")
+                err_str = str(e)
+
+                # User không thể live → dừng hẳn, không retry
+                if any(kw in err_str for kw in _SKIP_ERRORS):
+                    logger.debug(f"@{self.username} không hỗ trợ live → bỏ qua")
+                    self._running = False
+                    return
+
+                # Rate limit / SSL tạm thời → thử lại nhanh hơn
+                if any(kw in err_str for kw in _SOFT_ERRORS):
+                    logger.debug(f"@{self.username} lỗi tạm thời ({type(e).__name__}), thử lại sau {RETRY_DELAY_DISCONNECTED}s")
+                    await asyncio.sleep(RETRY_DELAY_DISCONNECTED)
+                    continue
+
+                logger.error(f"@{self.username} lỗi: {e}")
                 await asyncio.sleep(RETRY_DELAY_ERROR)
 
     async def _connect_and_listen(self):
