@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import re
+import subprocess
+import sys
 import time
 from typing import Set, Callable, Awaitable
 
@@ -52,6 +54,7 @@ class LiveDiscovery:
         self._running = False
         self._playwright: "Playwright | None" = None
         self._browser: "Browser | None" = None
+        self._install_attempted = False
 
     def start(self):
         if not self._running:
@@ -94,12 +97,49 @@ class LiveDiscovery:
             logger.info("[Discovery] Đã khởi động Chromium headless")
             return True
         except Exception as e:
+            is_missing_binary = "Executable doesn't exist" in str(e)
+            if is_missing_binary and not self._install_attempted:
+                # Chromium chưa được cài lúc build (ví dụ Railway bỏ qua bước
+                # nixpacks.toml) — tự cài ngay lúc chạy, chỉ thử 1 lần để
+                # tránh lặp vô hạn nếu môi trường không cho phép cài.
+                self._install_attempted = True
+                logger.warning(
+                    "[Discovery] Chưa có Chromium — đang tự cài lúc runtime "
+                    "(có thể mất 1-2 phút, chỉ xảy ra 1 lần)..."
+                )
+                if await self._install_chromium():
+                    return await self._ensure_browser()
+
             logger.error(
-                f"[Discovery] Không khởi động được Chromium: {type(e).__name__}: {e}. "
-                f"Kiểm tra đã chạy 'playwright install chromium' trong lúc build chưa."
+                f"[Discovery] Không khởi động được Chromium: {type(e).__name__}: {e}"
             )
+            if self._playwright:
+                try:
+                    await self._playwright.stop()
+                except Exception:
+                    pass
             self._playwright = None
             self._browser = None
+            return False
+
+    async def _install_chromium(self) -> bool:
+        """Chạy `playwright install chromium` ngay lúc runtime nếu chưa có sẵn."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "playwright", "install", "chromium",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            out, _ = await proc.communicate()
+            if proc.returncode == 0:
+                logger.info("[Discovery] Cài Chromium thành công")
+                return True
+            logger.error(
+                f"[Discovery] Cài Chromium thất bại (mã {proc.returncode}): "
+                f"{out.decode(errors='ignore')[-500:]}"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"[Discovery] Lỗi khi tự cài Chromium: {type(e).__name__}: {e}")
             return False
 
     async def _close_browser(self):
