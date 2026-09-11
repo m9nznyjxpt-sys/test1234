@@ -200,12 +200,21 @@ class TelegramBot:
 
         await self.app.initialize()
 
-        # ✅ FIX CONFLICT: Xóa webhook + pending updates từ instance cũ
+        # ✅ FIX CONFLICT: Xóa webhook + đợi polling cũ timeout hẳn
+        # delete_webhook chỉ kill webhook — không kill polling connection cũ.
+        # Phải gọi getUpdates(timeout=0) để "cướp" offset, rồi sleep 5s để
+        # Telegram server xác nhận instance cũ đã chết trước khi ta poll mới.
         try:
             await self.app.bot.delete_webhook(drop_pending_updates=True)
             logger.info("✅ Đã xóa webhook cũ")
         except Exception as e:
             logger.warning(f"delete_webhook: {e}")
+        try:
+            await self.app.bot.get_updates(offset=-1, timeout=0)
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+        logger.info("✅ Đã đợi instance cũ ngắt — bắt đầu polling mới")
 
         await self.app.bot.set_my_commands([
             BotCommand("add",    "Thêm streamer thủ công"),
