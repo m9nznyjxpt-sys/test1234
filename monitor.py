@@ -126,14 +126,39 @@ class StreamerMonitor:
         # ──────────────────────────────────────────────────
         @client.on(EnvelopeEvent)
         async def on_envelope(event: EnvelopeEvent):
-            if isinstance(event, SuperFanBoxEvent):
-                return
             if event.display != EnvelopeDisplay.NEW:
                 return
 
             info = event.envelope_info
             if not info:
                 return
+
+            # ── FIX QUAN TRỌNG ──
+            # Thư viện TikTokLive, khi nhận 1 sự kiện RƯƠNG (Super Fan Box),
+            # thực chất phát ra HAI object khác nhau cho cùng 1 gói tin gốc:
+            #   1. Một EnvelopeEvent "chung chung" (parse mặc định)
+            #   2. Một SuperFanBoxEvent "chuyên biệt" (parse lại có phân loại)
+            # Vì đây là 2 instance Python khác nhau, `isinstance(event,
+            # SuperFanBoxEvent)` ở handler này luôn False với bản EnvelopeEvent
+            # chung — nên rương vẫn lọt qua đây và bị báo nhầm thành túi.
+            # Tệ hơn: việc báo nhầm này còn tự set cooldown "bag" cho streamer,
+            # khiến túi thật xuất hiện ngay sau đó trong 10 phút bị nuốt mất
+            # vì tưởng vừa mới báo túi rồi.
+            #
+            # Sửa bằng cách tự kiểm tra business_type / display marker —
+            # đúng cách chính thư viện dùng để phân loại rương — thay vì dựa
+            # vào isinstance trên instance có thể không phải bản đã phân loại.
+            business_type = getattr(info, "business_type", None)
+            is_actually_chest = business_type == EnvelopeBusinessType.SUPER_FAN_BOX
+            if not is_actually_chest:
+                try:
+                    from TikTokLive.proto.proto_utils import common_display_type
+                    if "ttlive_superfanbox" in common_display_type(event.common).lower():
+                        is_actually_chest = True
+                except Exception:
+                    pass
+            if is_actually_chest:
+                return  # Đây thực chất là rương — để on_chest xử lý
 
             # Chống gửi trùng cùng 1 envelope_id
             eid = info.envelope_id or ""
