@@ -71,8 +71,17 @@ class LiveDiscovery:
         if async_playwright is None:
             logger.warning("playwright chưa cài")
             return False
+
+        # BUG CŨ: chỉ check `self._browser is not None` — nếu Chromium đã
+        # crash (ví dụ bị OOM-kill), biến này vẫn giữ tham chiếu tới 1 browser
+        # đã chết, khiến hàm này luôn trả True mà không bao giờ khởi động lại,
+        # làm mọi lần quét sau đó thất bại vĩnh viễn với "Connection closed".
         if self._browser is not None:
-            return True
+            if self._browser.is_connected():
+                return True
+            logger.warning("[Discovery] Chromium cũ đã chết (mất kết nối) — khởi động lại")
+            await self._close_browser()
+
         try:
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(
@@ -95,13 +104,7 @@ class LiveDiscovery:
                 if await self._install_chromium():
                     return await self._ensure_browser()
             logger.error(f"[Discovery] Không khởi động được Chromium: {type(e).__name__}: {e}")
-            if self._playwright:
-                try:
-                    await self._playwright.stop()
-                except Exception:
-                    pass
-            self._playwright = None
-            self._browser = None
+            await self._close_browser()
             return False
 
     async def _install_chromium(self) -> bool:
@@ -160,77 +163,94 @@ class LiveDiscovery:
 
         usernames: set[str] = set()
         captured_responses = 0
+        context = None
 
-        context = await self._browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            locale="vi-VN",
-            viewport={"width": 1280, "height": 900},
-            # Tắt WebDriver flag để TikTok không detect bot
-            extra_http_headers={
-                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
-            },
-        )
-
-        # Chặn resource không cần thiết để load nhanh hơn
-        await context.route(
-            "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
-            lambda route: route.abort()
-        )
-
-        page = await context.new_page()
-
-        # Ẩn navigator.webdriver
-        await page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        """)
-
-        async def on_response(response):
-            nonlocal captured_responses
-            url = response.url
-            if not any(p in url for p in WATCHED_URL_PATTERNS):
-                return
-            try:
-                data = await response.json()
-                captured_responses += 1
-                usernames.update(self._walk_extract_live_usernames(data))
-            except Exception:
-                pass
-
-        page.on("response", on_response)
-
-        # ── Chiến lược 1: trang /live chính
         try:
-            await page.goto(
-                "https://www.tiktok.com/live",
-                wait_until="domcontentloaded",   # nhanh hơn networkidle
-                timeout=PAGE_TIMEOUT_MS,
+            context = await self._browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                locale="vi-VN",
+                viewport={"width": 1280, "height": 900},
+                # Tắt WebDriver flag để TikTok không detect bot
+                extra_http_headers={
+                    "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
             )
-            # Đợi thêm để XHR kịp fire
-            await page.wait_for_timeout(4000)
 
-            # Cuộn để kích lazy-load
-            for _ in range(3):
-                await page.mouse.wheel(0, 2000)
-                await page.wait_for_timeout(1500)
+            # Chặn resource không cần thiết để load nhanh hơn
+            await context.route(
+                "**/*.{png,jpg,jpeg,gif,webp,svg,woff,woff2,ttf,mp4,mp3}",
+                lambda route: route.abort()
+            )
 
-            # Chiến lược 2: extract từ SIGI_STATE / UNIVERSAL_DATA nhúng trong
-            # HTML của chính trang /live — CHỈ dùng trang /live, không dùng
-            # /explore, vì /explore là feed video thường, không phải live.
-            html = await page.content()
-            usernames.update(self._extract_from_html(html))
+            page = await context.new_page()
+
+            # Ẩn navigator.webdriver
+            await page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            """)
+
+            async def on_response(response):
+                nonlocal captured_responses
+                url = response.url
+                if not any(p in url for p in WATCHED_URL_PATTERNS):
+                    return
+                try:
+                    data = await response.json()
+                    captured_responses += 1
+                    usernames.update(self._walk_extract_live_usernames(data))
+                except Exception:
+                    pass
+
+            page.on("response", on_response)
+
+            # ── Chiến lược 1: trang /live chính
+            try:
+                await page.goto(
+                    "https://www.tiktok.com/live",
+                    wait_until="domcontentloaded",   # nhanh hơn networkidle
+                    timeout=PAGE_TIMEOUT_MS,
+                )
+                # Đợi thêm để XHR kịp fire
+                await page.wait_for_timeout(4000)
+
+                # Cuộn để kích lazy-load
+                for _ in range(3):
+                    await page.mouse.wheel(0, 2000)
+                    await page.wait_for_timeout(1500)
+
+                # Chiến lược 2: extract từ SIGI_STATE / UNIVERSAL_DATA nhúng trong
+                # HTML của chính trang /live — CHỈ dùng trang /live, không dùng
+                # /explore, vì /explore là feed video thường, không phải live.
+                html = await page.content()
+                usernames.update(self._extract_from_html(html))
+
+            except Exception as e:
+                logger.warning(f"[Discovery] Load /live lỗi: {type(e).__name__}: {e}")
+
+            await page.close()
+            await context.close()
 
         except Exception as e:
-            logger.warning(f"[Discovery] Load /live lỗi: {type(e).__name__}: {e}")
-
-        # Không còn fallback sang /explore — nguồn đó vốn không phản ánh
-        # trạng thái live, chỉ khiến bot thêm nhầm acc không live vào theo dõi.
-
-        await page.close()
-        await context.close()
+            # BUG CŨ: lỗi ở đây (ví dụ Chromium đã crash, "Connection closed
+            # while reading from the driver") chỉ bị log ở _loop() rồi bỏ qua,
+            # còn self._browser vẫn giữ tham chiếu chết → mọi lần quét sau đó
+            # thất bại y hệt, vĩnh viễn, không bao giờ tự hồi phục.
+            # Giờ reset ngay để lần quét kế tiếp tự khởi động Chromium mới.
+            logger.error(
+                f"[Discovery] Lỗi khi dùng browser — reset để lần sau khởi động lại: "
+                f"{type(e).__name__}: {e}"
+            )
+            await self._close_browser()
+            if context:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+            return usernames
 
         logger.info(
             f"[Discovery] Kết quả: {len(usernames)} username | "
