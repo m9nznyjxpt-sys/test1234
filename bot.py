@@ -6,6 +6,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 from monitor import MultiMonitor
 from discovery import LiveDiscovery
+import storage
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class TelegramBot:
         self.app.add_handler(CommandHandler("remove", self._cmd_remove))
         self.app.add_handler(CommandHandler("list",   self._cmd_list))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
+        self.app.add_handler(CommandHandler("stats",  self._cmd_stats))
         self.app.add_handler(CommandHandler("help",   self._cmd_help))
 
     # ──────────────────────────────────────────────────────────
@@ -107,13 +109,17 @@ class TelegramBot:
         else:
             return
         await self._msg_queue.put(text)
+        storage.log_event(
+            username, event_type,
+            data.get("diamond_count", 0), data.get("people_count", 0),
+        )
         logger.info(f"[Queue] {event_type} @{username} | queue={self._msg_queue.qsize()}")
 
     # ──────────────────────────────────────────────────────────
     # CALLBACK TỰ ĐỘNG TỪ DISCOVERY
     # ──────────────────────────────────────────────────────────
     async def _on_discovery_add(self, username: str):
-        added = await self.monitor.add(username)
+        added = await self.monitor.add(username, source="discovery")
         if added:
             logger.info(f"[Auto-discovery] Thêm @{username}")
 
@@ -137,7 +143,8 @@ class TelegramBot:
             "/add <code>@username</code>  —  Thêm streamer thủ công\n"
             "/remove <code>@username</code>  —  Xóa streamer\n"
             "/list  —  Xem danh sách đang theo dõi\n"
-            "/status  —  Xem trạng thái bot\n\n"
+            "/status  —  Xem trạng thái bot\n"
+            "/stats  —  Thống kê rương/túi đã bắt được\n\n"
             "<b>Chế độ tự động:</b>\n"
             "• Bot tự tìm streamer đang live mỗi 75 giây\n"
             "• Thông báo gửi cách nhau ít nhất 3 giây\n"
@@ -191,6 +198,35 @@ class TelegramBot:
             parse_mode=ParseMode.HTML,
         )
 
+    async def _cmd_stats(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        DAY = 86400
+        stats_24h = storage.get_stats(since_seconds=DAY)
+        stats_all = storage.get_stats()
+        top = storage.get_top_streamers(limit=5, since_seconds=DAY)
+
+        def _line(d: dict, key: str, label: str) -> str:
+            s = d.get(key, {"count": 0, "diamonds": 0})
+            return f"{label}: <b>{s['count']:,}</b> lần — <b>{s['diamonds']:,}</b> kim cương"
+
+        lines = [
+            "📈 <b>Thống kê</b>",
+            "",
+            "🕐 <u>24 giờ qua</u>",
+            _line(stats_24h, "bag", "🎁 Túi"),
+            _line(stats_24h, "chest", "📦 Rương"),
+            "",
+            "📊 <u>Từ trước đến nay</u>",
+            _line(stats_all, "bag", "🎁 Túi"),
+            _line(stats_all, "chest", "📦 Rương"),
+        ]
+
+        if top:
+            lines += ["", "🏆 <u>Top streamer (24h)</u>"]
+            for i, s in enumerate(top, 1):
+                lines.append(f"{i}. @{s['username']} — {s['count']} lần, {s['diamonds']:,} 💎")
+
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
     # ──────────────────────────────────────────────────────────
     # CHẠY BOT
     # ──────────────────────────────────────────────────────────
@@ -221,8 +257,18 @@ class TelegramBot:
             BotCommand("remove", "Xóa streamer"),
             BotCommand("list",   "Xem danh sách đang theo dõi"),
             BotCommand("status", "Trạng thái bot"),
+            BotCommand("stats",  "Thống kê rương/túi"),
             BotCommand("help",   "Hướng dẫn"),
         ])
+
+        # Khôi phục danh sách streamer đã lưu từ lần chạy trước (nếu ổ đĩa
+        # sống sót qua lần restart/redeploy này — xem cảnh báo trong storage.py
+        # về việc Railway có thể xóa ổ đĩa mỗi lần redeploy nếu chưa gắn Volume)
+        restored = storage.load_watchlist()
+        for username in restored:
+            await self.monitor.add(username, source="restored")
+        if restored:
+            logger.info(f"[Storage] Khôi phục {len(restored)} streamer từ lần chạy trước")
 
         await self.app.start()
         await self.app.updater.start_polling(
