@@ -11,6 +11,7 @@ from TikTokLive.events import (
     LiveEndEvent,
 )
 from TikTokLive.proto import EnvelopeDisplay, EnvelopeBusinessType
+import storage
 
 logger = logging.getLogger(__name__)
 
@@ -259,7 +260,7 @@ class MultiMonitor:
     def get_list(self) -> list[str]:
         return sorted(self._monitors.keys())
 
-    async def add(self, username: str) -> bool:
+    async def add(self, username: str, source: str = "manual") -> bool:
         """Thêm streamer. Trả về False nếu đã tồn tại."""
         key = username.lstrip("@").lower()
         if key in self._monitors:
@@ -267,6 +268,7 @@ class MultiMonitor:
         monitor = StreamerMonitor(key, self.notify)
         self._monitors[key] = monitor
         monitor.start()
+        storage.save_watch(key, source)   # lưu xuống DB để nhớ sau restart
         return True
 
     async def remove(self, username: str) -> bool:
@@ -276,6 +278,7 @@ class MultiMonitor:
             return False
         await self._monitors[key].stop()
         del self._monitors[key]
+        storage.remove_watch(key)
         return True
 
     async def stop_all(self):
